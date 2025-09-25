@@ -1,430 +1,322 @@
 <?php
 /**
- * Main booking functionality
+ * AJAX functionality
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-class RB_Booking {
+class RB_Ajax {
     
     public function __construct() {
-        // Initialize booking functionality
-        add_action('init', array($this, 'init'));
+        // Public AJAX actions (for logged in and non-logged in users)
+        add_action('wp_ajax_rb_check_availability', array($this, 'check_availability'));
+        add_action('wp_ajax_nopriv_rb_check_availability', array($this, 'check_availability'));
+        
+        add_action('wp_ajax_rb_create_booking', array($this, 'create_booking'));
+        add_action('wp_ajax_nopriv_rb_create_booking', array($this, 'create_booking'));
+        
+        // Admin AJAX actions
+        add_action('wp_ajax_rb_confirm_booking', array($this, 'confirm_booking'));
+        add_action('wp_ajax_rb_cancel_booking', array($this, 'cancel_booking'));
+        add_action('wp_ajax_rb_complete_booking', array($this, 'complete_booking'));
+        add_action('wp_ajax_rb_get_available_tables_for_booking', array($this, 'get_available_tables_for_booking'));
+        add_action('wp_ajax_rb_reset_table', array($this, 'reset_table'));
+        add_action('wp_ajax_rb_toggle_table', array($this, 'toggle_table'));
     }
     
-    public function init() {
-        // Add any initialization code here
+    public function check_availability() {
+        // Verify nonce
+        if (!wp_verify_nonce($_POST['nonce'], 'rb_booking_nonce')) {
+            wp_die('Security check failed');
+        }
+        
+        $date = sanitize_text_field($_POST['date']);
+        $time = sanitize_text_field($_POST['time']);
+        $guest_count = intval($_POST['guest_count']);
+        
+        // Validate inputs
+        if (empty($date) || empty($time) || $guest_count < 1) {
+            wp_send_json_error('Vui lòng điền đầy đủ thông tin');
+        }
+        
+        // Check if date is not in the past
+        if (strtotime($date) < strtotime(date('Y-m-d'))) {
+            wp_send_json_error('Không thể đặt bàn cho ngày đã qua');
+        }
+        
+        // Get available tables
+        $available_tables = RB_Database::get_available_tables($date, $time, $guest_count);
+        
+        if (empty($available_tables)) {
+            wp_send_json_error('Không có bàn trống cho thời gian này. Vui lòng chọn thời gian khác.');
+        }
+        
+        $tables_html = '';
+        foreach ($available_tables as $table) {
+            $tables_html .= '<div class="rb-table-option">';
+            $tables_html .= '<label>';
+            $tables_html .= '<input type="radio" name="selected_table" value="' . $table->table_number . '">';
+            $tables_html .= ' Bàn ' . $table->table_number . ' (' . $table->capacity . ' chỗ)';
+            $tables_html .= '</label>';
+            $tables_html .= '</div>';
+        }
+        
+        wp_send_json_success(array(
+            'tables_html' => $tables_html,
+            'message' => 'Tìm thấy ' . count($available_tables) . ' bàn trống'
+        ));
     }
     
-    /**
-     * Validate booking data
-     */
-    public static function validate_booking_data($data) {
-        $errors = array();
+    public function create_booking() {
+        // Verify nonce
+        if (!wp_verify_nonce($_POST['nonce'], 'rb_booking_nonce')) {
+            wp_die('Security check failed');
+        }
         
         // Validate required fields
-        if (empty($data['customer_name'])) {
-            $errors[] = 'Tên khách hàng là bắt buộc';
-        }
+        $required_fields = array('customer_name', 'customer_phone', 'customer_email', 'guest_count', 'booking_date', 'booking_time');
         
-        if (empty($data['customer_phone'])) {
-            $errors[] = 'Số điện thoại là bắt buộc';
-        } elseif (!preg_match('/^[0-9]{10}$/', $data['customer_phone'])) {
-            $errors[] = 'Số điện thoại không hợp lệ (10 chữ số)';
-        }
-        
-        if (empty($data['customer_email'])) {
-            $errors[] = 'Email là bắt buộc';
-        } elseif (!is_email($data['customer_email'])) {
-            $errors[] = 'Email không hợp lệ';
-        }
-        
-        if (empty($data['guest_count']) || intval($data['guest_count']) < 1) {
-            $errors[] = 'Số lượng khách phải ít nhất 1 người';
-        } elseif (intval($data['guest_count']) > 20) {
-            $errors[] = 'Số lượng khách không được vượt quá 20 người';
-        }
-        
-        if (empty($data['booking_date'])) {
-            $errors[] = 'Ngày đặt bàn là bắt buộc';
-        } else {
-            $booking_date = strtotime($data['booking_date']);
-            $today = strtotime(date('Y-m-d'));
-            
-            if ($booking_date < $today) {
-                $errors[] = 'Không thể đặt bàn cho ngày đã qua';
-            }
-            
-            // Check if booking date is too far in the future (e.g., 3 months)
-            $max_advance_days = 90;
-            if ($booking_date > strtotime("+{$max_advance_days} days")) {
-                $errors[] = "Chỉ có thể đặt bàn trước tối đa {$max_advance_days} ngày";
+        foreach ($required_fields as $field) {
+            if (empty($_POST[$field])) {
+                wp_send_json_error('Vui lòng điền đầy đủ thông tin bắt buộc');
             }
         }
         
-        if (empty($data['booking_time'])) {
-            $errors[] = 'Giờ đặt bàn là bắt buộc';
-        } else {
-            $opening_hours = get_option('rb_opening_hours', array('start' => '09:00', 'end' => '22:00'));
-            $booking_time = $data['booking_time'];
-            
-            if ($booking_time < $opening_hours['start'] || $booking_time > $opening_hours['end']) {
-                $errors[] = "Giờ đặt bàn phải trong khoảng {$opening_hours['start']} - {$opening_hours['end']}";
-            }
-        }
-        
-        return $errors;
-    }
-    
-    /**
-     * Check if the restaurant is open on a given date
-     */
-    public static function is_restaurant_open($date) {
-        $day_of_week = date('N', strtotime($date)); // 1 (Monday) to 7 (Sunday)
-        
-        // Check if it's a holiday or closed day
-        $closed_days = get_option('rb_closed_days', array());
-        
-        if (in_array($day_of_week, $closed_days)) {
-            return false;
-        }
-        
-        // Check specific closed dates
-        $closed_dates = get_option('rb_closed_dates', array());
-        if (in_array($date, $closed_dates)) {
-            return false;
-        }
-        
-        return true;
-    }
-    
-    /**
-     * Get available time slots for a specific date
-     */
-    public static function get_available_time_slots($date, $guest_count = 1) {
-        if (!self::is_restaurant_open($date)) {
-            return array();
-        }
-        
-        $opening_hours = get_option('rb_opening_hours', array('start' => '09:00', 'end' => '22:00'));
-        $booking_duration = get_option('rb_booking_duration', 120); // minutes
-        
-        $start_time = strtotime($opening_hours['start']);
-        $end_time = strtotime($opening_hours['end']);
-        $slot_duration = 30 * 60; // 30 minutes in seconds
-        
-        $available_slots = array();
-        
-        for ($time = $start_time; $time < $end_time; $time += $slot_duration) {
-            $time_slot = date('H:i', $time);
-            
-            // Check if there are available tables for this time slot
-            $available_tables = RB_Database::get_available_tables($date, $time_slot, $guest_count);
-            
-            if (!empty($available_tables)) {
-                $available_slots[] = array(
-                    'time' => $time_slot,
-                    'available_tables' => count($available_tables),
-                    'display' => date('H:i', $time)
-                );
-            }
-        }
-        
-        return $available_slots;
-    }
-    
-    /**
-     * Calculate table occupancy for a given date
-     */
-    public static function get_table_occupancy($date) {
-        global $wpdb;
-        
-        $table_availability = $wpdb->prefix . 'restaurant_table_availability';
-        $restaurant_tables = $wpdb->prefix . 'restaurant_tables';
-        
-        // Get total number of tables
-        $total_tables = $wpdb->get_var("SELECT COUNT(*) FROM {$restaurant_tables} WHERE is_available = 1");
-        
-        // Get occupied tables for the date
-        $occupied_tables = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(DISTINCT table_id) FROM {$table_availability} 
-             WHERE booking_date = %s AND is_occupied = 1",
-            $date
-        ));
-        
-        $occupancy_rate = $total_tables > 0 ? ($occupied_tables / $total_tables) * 100 : 0;
-        
-        return array(
-            'total_tables' => $total_tables,
-            'occupied_tables' => $occupied_tables,
-            'available_tables' => $total_tables - $occupied_tables,
-            'occupancy_rate' => round($occupancy_rate, 2)
+        // Sanitize data
+        $booking_data = array(
+            'customer_name' => sanitize_text_field($_POST['customer_name']),
+            'customer_phone' => sanitize_text_field($_POST['customer_phone']),
+            'customer_email' => sanitize_email($_POST['customer_email']),
+            'guest_count' => intval($_POST['guest_count']),
+            'booking_date' => sanitize_text_field($_POST['booking_date']),
+            'booking_time' => sanitize_text_field($_POST['booking_time']),
+            'special_requests' => sanitize_textarea_field($_POST['special_requests'])
         );
-    }
-    
-    /**
-     * Get booking statistics
-     */
-    public static function get_booking_statistics($start_date = null, $end_date = null) {
-        global $wpdb;
         
-        if (!$start_date) {
-            $start_date = date('Y-m-01'); // First day of current month
+        // Validate email
+        if (!is_email($booking_data['customer_email'])) {
+            wp_send_json_error('Email không hợp lệ');
         }
         
-        if (!$end_date) {
-            $end_date = date('Y-m-t'); // Last day of current month
-        }
+        // Create booking
+        $booking_id = RB_Database::create_booking($booking_data);
         
-        $bookings_table = $wpdb->prefix . 'restaurant_bookings';
-        
-        // Total bookings
-        $total_bookings = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$bookings_table} 
-             WHERE booking_date BETWEEN %s AND %s",
-            $start_date, $end_date
-        ));
-        
-        // Confirmed bookings
-        $confirmed_bookings = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$bookings_table} 
-             WHERE booking_date BETWEEN %s AND %s AND status = 'confirmed'",
-            $start_date, $end_date
-        ));
-        
-        // Pending bookings
-        $pending_bookings = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$bookings_table} 
-             WHERE booking_date BETWEEN %s AND %s AND status = 'pending'",
-            $start_date, $end_date
-        ));
-        
-        // Cancelled bookings
-        $cancelled_bookings = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$bookings_table} 
-             WHERE booking_date BETWEEN %s AND %s AND status = 'cancelled'",
-            $start_date, $end_date
-        ));
-        
-        // Average guests per booking
-        $avg_guests = $wpdb->get_var($wpdb->prepare(
-            "SELECT AVG(guest_count) FROM {$bookings_table} 
-             WHERE booking_date BETWEEN %s AND %s AND status != 'cancelled'",
-            $start_date, $end_date
-        ));
-        
-        // Most popular time slots
-        $popular_times = $wpdb->get_results($wpdb->prepare(
-            "SELECT booking_time, COUNT(*) as count 
-             FROM {$bookings_table} 
-             WHERE booking_date BETWEEN %s AND %s AND status = 'confirmed'
-             GROUP BY booking_time 
-             ORDER BY count DESC 
-             LIMIT 5",
-            $start_date, $end_date
-        ));
-        
-        return array(
-            'period' => array(
-                'start' => $start_date,
-                'end' => $end_date
-            ),
-            'total_bookings' => intval($total_bookings),
-            'confirmed_bookings' => intval($confirmed_bookings),
-            'pending_bookings' => intval($pending_bookings),
-            'cancelled_bookings' => intval($cancelled_bookings),
-            'confirmation_rate' => $total_bookings > 0 ? round(($confirmed_bookings / $total_bookings) * 100, 2) : 0,
-            'avg_guests_per_booking' => round($avg_guests, 1),
-            'popular_times' => $popular_times
-        );
-    }
-    
-    /**
-     * Clean up expired pending bookings
-     */
-    public static function cleanup_expired_bookings() {
-        global $wpdb;
-        
-        $bookings_table = $wpdb->prefix . 'restaurant_bookings';
-        $availability_table = $wpdb->prefix . 'restaurant_table_availability';
-        
-        // Get expired pending bookings (older than 2 hours from booking time)
-        $expired_bookings = $wpdb->get_results($wpdb->prepare(
-            "SELECT id, booking_date, booking_time FROM {$bookings_table} 
-             WHERE status = 'pending' 
-             AND CONCAT(booking_date, ' ', booking_time) < %s",
-            date('Y-m-d H:i:s', strtotime('-2 hours'))
-        ));
-        
-        foreach ($expired_bookings as $booking) {
-            // Update booking status to expired
-            $wpdb->update(
-                $bookings_table,
-                array('status' => 'expired'),
-                array('id' => $booking->id),
-                array('%s'),
-                array('%d')
-            );
+        if ($booking_id) {
+            // Send notification email to admin
+            $this->send_admin_notification($booking_id);
             
-            // Free up any reserved tables
-            $wpdb->update(
-                $availability_table,
-                array('is_occupied' => 0, 'booking_id' => null),
-                array('booking_id' => $booking->id),
-                array('%d', '%d'),
-                array('%d')
-            );
+            wp_send_json_success(array(
+                'message' => 'Đặt bàn thành công! Chúng tôi sẽ liên hệ xác nhận trong thời gian sớm nhất.',
+                'booking_id' => $booking_id
+            ));
+        } else {
+            wp_send_json_error('Có lỗi xảy ra khi đặt bàn. Vui lòng thử lại.');
         }
-        
-        return count($expired_bookings);
     }
     
-    /**
-     * Get upcoming bookings for today
-     */
-    public static function get_todays_bookings() {
-        $today = date('Y-m-d');
-        $bookings = RB_Database::get_bookings('confirmed');
-        
-        $todays_bookings = array_filter($bookings, function($booking) use ($today) {
-            return $booking->booking_date === $today;
-        });
-        
-        // Sort by booking time
-        usort($todays_bookings, function($a, $b) {
-            return strcmp($a->booking_time, $b->booking_time);
-        });
-        
-        return $todays_bookings;
-    }
-    
-    /**
-     * Get booking conflicts (double bookings)
-     */
-    public static function get_booking_conflicts($date = null) {
-        global $wpdb;
-        
-        if (!$date) {
-            $date = date('Y-m-d');
+    public function confirm_booking() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
         }
         
-        $availability_table = $wpdb->prefix . 'restaurant_table_availability';
-        $bookings_table = $wpdb->prefix . 'restaurant_bookings';
-        
-        // Find tables with multiple bookings at the same time
-        $conflicts = $wpdb->get_results($wpdb->prepare(
-            "SELECT table_id, booking_date, booking_time, COUNT(*) as booking_count
-             FROM {$availability_table} 
-             WHERE booking_date = %s AND is_occupied = 1
-             GROUP BY table_id, booking_date, booking_time
-             HAVING booking_count > 1",
-            $date
-        ));
-        
-        return $conflicts;
-    }
-    
-    /**
-     * Send booking reminders for tomorrow's bookings
-     */
-    public static function send_booking_reminders() {
-        $tomorrow = date('Y-m-d', strtotime('+1 day'));
-        
-        global $wpdb;
-        $bookings_table = $wpdb->prefix . 'restaurant_bookings';
-        
-        $tomorrow_bookings = $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$bookings_table} 
-             WHERE booking_date = %s AND status = 'confirmed'",
-            $tomorrow
-        ));
-        
-        $sent_count = 0;
-        foreach ($tomorrow_bookings as $booking) {
-            if (RB_Email::send_reminder_email($booking->id)) {
-                $sent_count++;
-            }
+        if (!wp_verify_nonce($_POST['nonce'], 'rb_admin_nonce')) {
+            wp_die('Security check failed');
         }
         
-        return $sent_count;
-    }
-    
-    /**
-     * Auto-confirm bookings if enabled
-     */
-    public static function auto_confirm_booking($booking_id) {
-        $auto_confirm = get_option('rb_auto_confirm_bookings', false);
+        $booking_id = intval($_POST['booking_id']);
+        $table_number = intval($_POST['table_number']);
         
-        if (!$auto_confirm) {
-            return false;
+        if (!$booking_id || !$table_number) {
+            wp_send_json_error('Thiếu thông tin bắt buộc');
         }
         
+        $result = RB_Database::update_booking_status($booking_id, 'confirmed', $table_number);
+        
+        if ($result !== false) {
+            // Send confirmation email to customer
+            $this->send_confirmation_email($booking_id);
+            
+            wp_send_json_success('Đặt bàn đã được xác nhận và email đã được gửi');
+        } else {
+            wp_send_json_error('Có lỗi xảy ra khi xác nhận đặt bàn');
+        }
+    }
+    
+    public function cancel_booking() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
+        if (!wp_verify_nonce($_POST['nonce'], 'rb_admin_nonce')) {
+            wp_die('Security check failed');
+        }
+        
+        $booking_id = intval($_POST['booking_id']);
+        
+        $result = RB_Database::update_booking_status($booking_id, 'cancelled');
+        
+        if ($result !== false) {
+            wp_send_json_success('Đặt bàn đã được hủy');
+        } else {
+            wp_send_json_error('Có lỗi xảy ra khi hủy đặt bàn');
+        }
+    }
+    
+    public function complete_booking() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
+        if (!wp_verify_nonce($_POST['nonce'], 'rb_admin_nonce')) {
+            wp_die('Security check failed');
+        }
+        
+        $booking_id = intval($_POST['booking_id']);
+        
+        $result = RB_Database::update_booking_status($booking_id, 'completed');
+        
+        if ($result !== false) {
+            // Free up the table
+            $this->free_table($booking_id);
+            
+            wp_send_json_success('Đặt bàn đã hoàn thành');
+        } else {
+            wp_send_json_error('Có lỗi xảy ra');
+        }
+    }
+    
+    public function get_available_tables_for_booking() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
+        $booking_id = intval($_POST['booking_id']);
         $booking = RB_Database::get_booking_by_id($booking_id);
+        
         if (!$booking) {
-            return false;
+            wp_send_json_error('Không tìm thấy đặt bàn');
         }
         
-        // Get the best available table
         $available_tables = RB_Database::get_available_tables(
-            $booking->booking_date,
-            $booking->booking_time,
+            $booking->booking_date, 
+            $booking->booking_time, 
             $booking->guest_count
         );
         
-        if (empty($available_tables)) {
-            return false;
+        $tables_html = '';
+        foreach ($available_tables as $table) {
+            $tables_html .= '<label class="rb-table-choice">';
+            $tables_html .= '<input type="radio" name="table_number" value="' . $table->table_number . '" required>';
+            $tables_html .= ' Bàn ' . $table->table_number . ' (' . $table->capacity . ' chỗ)';
+            $tables_html .= '</label>';
         }
         
-        // Select the smallest suitable table
-        $selected_table = $available_tables[0];
-        
-        // Confirm the booking
-        $result = RB_Database::update_booking_status($booking_id, 'confirmed', $selected_table->table_number);
-        
-        if ($result !== false) {
-            // Send confirmation email
-            RB_Email::send_confirmation_email($booking_id);
-            return true;
+        wp_send_json_success(array(
+            'tables_html' => $tables_html,
+            'booking_info' => $booking
+        ));
+    }
+    
+    public function reset_table() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
         }
         
-        return false;
+        global $wpdb;
+        $table_id = intval($_POST['table_id']);
+        $today = date('Y-m-d');
+        
+        // Clear today's bookings for this table
+        $wpdb->update(
+            $wpdb->prefix . 'restaurant_table_availability',
+            array('is_occupied' => 0, 'booking_id' => null),
+            array('table_id' => $table_id, 'booking_date' => $today),
+            array('%d', '%d'),
+            array('%d', '%s')
+        );
+        
+        wp_send_json_success('Bàn đã được reset');
     }
     
-    /**
-     * Check table availability for a specific time range
-     */
-    public static function check_table_availability_range($table_id, $date, $start_time, $end_time) {
+    public function toggle_table() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
         global $wpdb;
+        $table_id = intval($_POST['table_id']);
+        $current_status = intval($_POST['current_status']);
+        $new_status = $current_status ? 0 : 1;
         
-        $availability_table = $wpdb->prefix . 'restaurant_table_availability';
+        $wpdb->update(
+            $wpdb->prefix . 'restaurant_tables',
+            array('is_available' => $new_status),
+            array('id' => $table_id),
+            array('%d'),
+            array('%d')
+        );
         
-        $conflicts = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$availability_table}
-             WHERE table_id = %d 
-             AND booking_date = %s 
-             AND booking_time BETWEEN %s AND %s
-             AND is_occupied = 1",
-            $table_id, $date, $start_time, $end_time
-        ));
-        
-        return $conflicts == 0;
+        $status_text = $new_status ? 'kích hoạt' : 'tạm ngưng';
+        wp_send_json_success("Bàn đã được {$status_text}");
     }
     
-    /**
-     * Get restaurant capacity for a specific date
-     */
-    public static function get_restaurant_capacity($date) {
+    private function send_admin_notification($booking_id) {
+        $booking = RB_Database::get_booking_by_id($booking_id);
+        if (!$booking) return;
+        
+        $admin_email = get_option('admin_email');
+        $subject = 'Đặt bàn mới cần xác nhận - ' . get_bloginfo('name');
+        
+        $message = "Có đặt bàn mới cần xác nhận:\n\n";
+        $message .= "Khách hàng: " . $booking->customer_name . "\n";
+        $message .= "Điện thoại: " . $booking->customer_phone . "\n";
+        $message .= "Email: " . $booking->customer_email . "\n";
+        $message .= "Số khách: " . $booking->guest_count . "\n";
+        $message .= "Ngày: " . date('d/m/Y', strtotime($booking->booking_date)) . "\n";
+        $message .= "Giờ: " . date('H:i', strtotime($booking->booking_time)) . "\n";
+        
+        if ($booking->special_requests) {
+            $message .= "Yêu cầu đặc biệt: " . $booking->special_requests . "\n";
+        }
+        
+        $message .= "\nVui lòng vào admin để xác nhận: " . admin_url('admin.php?page=restaurant-booking');
+        
+        wp_mail($admin_email, $subject, $message);
+    }
+    
+    private function send_confirmation_email($booking_id) {
+        $booking = RB_Database::get_booking_by_id($booking_id);
+        if (!$booking) return;
+        
+        $subject = 'Xác nhận đặt bàn - ' . get_bloginfo('name');
+        
+        $message = "Chào " . $booking->customer_name . ",\n\n";
+        $message .= "Đặt bàn của bạn đã được xác nhận!\n\n";
+        $message .= "Thông tin đặt bàn:\n";
+        $message .= "- Ngày: " . date('d/m/Y', strtotime($booking->booking_date)) . "\n";
+        $message .= "- Giờ: " . date('H:i', strtotime($booking->booking_time)) . "\n";
+        $message .= "- Số khách: " . $booking->guest_count . "\n";
+        
+        if ($booking->table_number) {
+            $message .= "- Bàn số: " . $booking->table_number . "\n";
+        }
+        
+        $message .= "\nCảm ơn bạn đã chọn " . get_bloginfo('name') . "!";
+        
+        wp_mail($booking->customer_email, $subject, $message);
+    }
+    
+    private function free_table($booking_id) {
         global $wpdb;
         
-        $tables_table = $wpdb->prefix . 'restaurant_tables';
-        
-        $capacity = $wpdb->get_var($wpdb->prepare(
-            "SELECT SUM(capacity) FROM {$tables_table} 
-             WHERE is_available = 1"
-        ));
-        
-        return intval($capacity);
+        $wpdb->update(
+            $wpdb->prefix . 'restaurant_table_availability',
+            array('is_occupied' => 0),
+            array('booking_id' => $booking_id),
+            array('%d'),
+            array('%d')
+        );
     }
 }
